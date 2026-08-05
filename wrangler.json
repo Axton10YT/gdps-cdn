@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cheesecdn",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-05",
+  "kv_namespaces": [
+    {
+      "binding": "SONG_HITS",
+      "id": "2a1f57f8b28c401aabf80f237c683593"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SONG_CACHE",
+      "bucket_name": "gdpscdn"
+    }
+  ]
+}
