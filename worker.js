@@ -34,20 +34,11 @@ export default {
         const downloadUrl = ngInfo.streamUrl || `https://audio.ngfiles.com/${songId - (songId % 1000)}/${songId}.mp3`;
 
         // Trigger background fetch and upload to R2 using ctx.waitUntil
-        ctx.waitUntil((async () => {
-          const audioRes = await fetchAudio(downloadUrl, null);
-          if (audioRes.ok) {
-            await env.SONG_CACHE.put(r2Key, audioRes.body, {
-              httpMetadata: { contentType: "audio/mpeg" },
-              customMetadata: {
-                songId: String(songId),
-                title: body.title || ngInfo.title || "",
-                artist: body.artist || ngInfo.artist || "",
-                uploadedAt: new Date().toISOString()
-              }
-            });
-          }
-        })());
+        ctx.waitUntil(cacheFullSong(env, r2Key, downloadUrl, {
+          songId: String(songId),
+          title: body.title || ngInfo.title || "",
+          artist: body.artist || ngInfo.artist || ""
+        }));
 
         return new Response(JSON.stringify({ success: true, message: "Upload queued", key: r2Key }), { status: 202 });
       } catch (err) {
@@ -74,14 +65,29 @@ export default {
 
     const id = parseInt(rawSongId, 10);
     const ngInfo = await fetchNgMetadata(id);
+    const newR2Key = `musics/${id}.mp3`;
+    const oldR2Key = `songs/${id}.mp3`;
+    const downloadUrl = ngInfo.streamUrl || `https://audio.ngfiles.com/${id - (id % 1000)}/${id}.mp3`;
 
     if (isInfoRequest) {
+      // Warm the cache in the background even on metadata-only lookups
+      ctx.waitUntil((async () => {
+        const hit = await env.SONG_CACHE.head(newR2Key);
+        if (!hit) {
+          await cacheFullSong(env, newR2Key, downloadUrl, {
+            songId: String(id),
+            title: ngInfo.title || "",
+            artist: ngInfo.artist || ""
+          });
+        }
+      })());
+
       return new Response(JSON.stringify({
         id: id,
         title: ngInfo.title,
         artist: ngInfo.artist,
         duration: ngInfo.duration,
-        streamUrl: ngInfo.streamUrl || `https://audio.ngfiles.com/${id - (id % 1000)}/${id}.mp3`,
+        streamUrl: downloadUrl,
         cdnUrl: `https://${url.host}/${id}`,
       }, null, 2), {
         status: 200,
@@ -90,16 +96,14 @@ export default {
     }
 
     // ── Route: GET /{songId} (Audio Streaming) ───────────────────────────────
-    // Check both new musics/ and legacy songs/ paths
-    const newR2Key = `musics/${id}.mp3`;
-    const oldR2Key = `songs/${id}.mp3`;
-
     const range = request.headers.get("Range");
     const r2Options = range ? { range: parseRangeHeader(range) } : {};
 
     let cached = await env.SONG_CACHE.get(newR2Key, r2Options);
+    let cacheKeyUsed = newR2Key;
     if (!cached) {
       cached = await env.SONG_CACHE.get(oldR2Key, r2Options);
+      cacheKeyUsed = oldR2Key;
     }
 
     if (cached) {
@@ -113,8 +117,7 @@ export default {
       return new Response(cached.body, { status, headers });
     }
 
-    // Fallback direct proxy if missing in R2
-    const downloadUrl = ngInfo.streamUrl || `https://audio.ngfiles.com/${id - (id % 1000)}/${id}.mp3`;
+    // ── Fallback: not in R2 — proxy from upstream AND cache it ──────────────
     const upstream = await fetchAudio(downloadUrl, range);
 
     const headers = new Headers(upstream.headers);
@@ -123,11 +126,55 @@ export default {
     headers.set("Content-Type", "audio/mpeg");
     headers.set("X-Cache", "PROXY");
 
+    const cacheMeta = {
+      songId: String(id),
+      title: ngInfo.title || "",
+      artist: ngInfo.artist || ""
+    };
+
+    if (!range && upstream.ok && upstream.body) {
+      // Full-file request: tee the stream — one copy to the client, one to R2.
+      // This is the main fix: previously the proxy fallback NEVER wrote to R2,
+      // so every cache miss stayed a miss forever, hammering the upstream every time.
+      const [clientStream, cacheStream] = upstream.body.tee();
+      ctx.waitUntil(
+        env.SONG_CACHE.put(newR2Key, cacheStream, {
+          httpMetadata: { contentType: "audio/mpeg" },
+          customMetadata: { ...cacheMeta, uploadedAt: new Date().toISOString() }
+        }).catch(() => {})
+      );
+      return new Response(clientStream, { status: upstream.status, headers });
+    }
+
+    if (range) {
+      // Partial/range request: can't cache a byte slice as the full file.
+      // Background-fetch the full file once (skip if another request already cached it).
+      ctx.waitUntil((async () => {
+        try {
+          const existing = await env.SONG_CACHE.head(newR2Key);
+          if (existing) return;
+          await cacheFullSong(env, newR2Key, downloadUrl, cacheMeta);
+        } catch (_) {}
+      })());
+    }
+
     return new Response(upstream.body, { status: upstream.status, headers });
   }
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+async function cacheFullSong(env, r2Key, downloadUrl, meta) {
+  try {
+    const audioRes = await fetchAudio(downloadUrl, null);
+    if (audioRes.ok) {
+      await env.SONG_CACHE.put(r2Key, audioRes.body, {
+        httpMetadata: { contentType: "audio/mpeg" },
+        customMetadata: { ...meta, uploadedAt: new Date().toISOString() }
+      });
+    }
+  } catch (_) {}
+}
 
 async function fetchNgMetadata(id) {
   try {
