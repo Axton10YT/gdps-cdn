@@ -6,8 +6,8 @@ const CUSTOM_ID_MAX = 999999999;
 
 function looksLikeMp3(bytes) {
   if (bytes.length < 3) return false;
-  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // "ID3"
-  if (bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0) return true; // MPEG frame sync
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true;
+  if (bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0) return true;
   return false;
 }
 __name(looksLikeMp3, "looksLikeMp3");
@@ -24,12 +24,25 @@ async function findFreeCustomId(env) {
 }
 __name(findFreeCustomId, "findFreeCustomId");
 
-// Simplified, rebuilt from scratch. No tabs, no accept="" filter on the file
-// input (that specific combination is a known WebKit bug on iOS - both
-// Safari AND Chrome, since Chrome-iOS uses WebKit too - where it silently
-// greys out every file in the native picker, making nothing selectable).
-// Whichever of file/url is actually filled in is what gets used; the
-// server's magic-byte check is the real validation either way.
+function resultPage(title, message, ok) {
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3; max-width: 560px; margin: 60px auto; padding: 0 20px; text-align: center; }
+  .box { padding: 20px; border-radius: 10px; border: 1px solid ${ok ? "#2ea043" : "#da3633"}; background: ${ok ? "#0d2818" : "#2d0f13"}; color: ${ok ? "#7ee787" : "#ffa198"}; white-space: pre-wrap; word-break: break-all; }
+  a { display: inline-block; margin-top: 20px; color: #58a6ff; }
+</style></head>
+<body><div class="box">${message}</div><a href="/upload">&larr; Upload another</a></body></html>`;
+}
+__name(resultPage, "resultPage");
+
+// Rebuilt with NO JavaScript in the critical path. This is a plain HTML
+// <form>, submitted with a real browser POST - the same mechanism that's
+// worked on every browser since forms existed. There is nothing here that
+// can silently fail to attach or fire: no addEventListener, no onsubmit,
+// no script timing to get wrong. The browser handles the whole submission
+// natively and the server responds with a normal page.
 const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -37,8 +50,6 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Upload a Custom Song - Cheese CDN</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #0d1117; color: #e6edf3; max-width: 560px; margin: 40px auto; padding: 0 20px;
@@ -55,13 +66,9 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
   input[type=file] { width: 100%; padding: 8px 0; font-size: 13px; }
   .or { text-align: center; color: #6e7681; font-size: 12px; margin: 10px 0; }
   button {
-    width: 100%; padding: 11px; border-radius: 7px; border: none; background: #238636;
-    color: white; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 4px;
+    width: 100%; padding: 12px; border-radius: 7px; border: none; background: #238636;
+    color: white; font-size: 16px; font-weight: 600;
   }
-  button:disabled { background: #30363d; cursor: not-allowed; }
-  #result { margin-top: 16px; padding: 12px; border-radius: 7px; font-size: 13px; display: none; white-space: pre-wrap; word-break: break-all; }
-  #result.ok { display: block; background: #0d2818; border: 1px solid #2ea043; color: #7ee787; }
-  #result.err { display: block; background: #2d0f13; border: 1px solid #da3633; color: #ffa198; }
   .hint { color: #6e7681; font-size: 12px; margin-top: 4px; }
 </style>
 </head>
@@ -69,103 +76,29 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
   <h1>Upload a Custom Song</h1>
   <p class="sub">Adds a track to the Cheese CDN music library. This is a public, open resource - no login needed.</p>
 
-  <form id="uploadForm" onsubmit="handleUpload(event); return false;">
+  <form action="/songUpload" method="POST" enctype="multipart/form-data">
     <fieldset>
       <legend>Source - pick one</legend>
       <label for="sourceFile">Choose an mp3 from your device</label>
-      <input type="file" id="sourceFile">
+      <input type="file" id="sourceFile" name="file">
       <div class="or">â€” or â€”</div>
       <label for="sourceUrl">Direct link to an mp3 file</label>
-      <input type="url" id="sourceUrl" placeholder="https://example.com/song.mp3">
+      <input type="url" id="sourceUrl" name="url" placeholder="https://example.com/song.mp3">
     </fieldset>
 
     <fieldset>
       <legend>Details</legend>
       <label for="title">Title</label>
-      <input type="text" id="title" required maxlength="200" placeholder="Song title">
+      <input type="text" id="title" name="title" required maxlength="200" placeholder="Song title">
       <label for="artist">Artist</label>
-      <input type="text" id="artist" required maxlength="200" placeholder="Artist name">
+      <input type="text" id="artist" name="artist" required maxlength="200" placeholder="Artist name">
       <label for="songId">Song ID (optional)</label>
-      <input type="number" id="songId" min="${CUSTOM_ID_MIN}" max="${CUSTOM_ID_MAX}" placeholder="Leave blank to auto-assign">
+      <input type="number" id="songId" name="songId" min="${CUSTOM_ID_MIN}" max="${CUSTOM_ID_MAX}" placeholder="Leave blank to auto-assign">
       <div class="hint">Custom songs use IDs ${CUSTOM_ID_MIN.toLocaleString()}-${CUSTOM_ID_MAX.toLocaleString()} so they never collide with real Newgrounds tracks.</div>
     </fieldset>
 
-    <button type="submit" id="submitBtn">Upload</button>
+    <button type="submit">Upload</button>
   </form>
-
-  <div id="result"></div>
-
-<script>
-window.onerror = function(msg, url, line, col, err) {
-  var r = document.getElementById('result');
-  if (r) {
-    r.className = 'err';
-    r.textContent = 'Page error: ' + msg + ' (line ' + line + ')';
-    r.style.display = 'block';
-  }
-  return false;
-};
-
-function handleUpload(e) {
-  // Belt-and-suspenders: this is bound via an inline onsubmit="" attribute,
-  // not addEventListener - that's parsed as part of the HTML itself and
-  // can't silently fail to attach the way a separate script-timing-dependent
-  // listener can. The form's onsubmit ALSO unconditionally returns false,
-  // so a default page-reloading submission is structurally impossible here
-  // regardless of what happens inside, rather than depending on
-  // preventDefault() being reached inside a try block.
-  doUpload(e);
-  return false;
-}
-
-async function doUpload(e) {
-  var btn = document.getElementById('submitBtn');
-  var result = document.getElementById('result');
-  result.className = ''; result.style.display = 'none';
-
-  var title = document.getElementById('title').value.trim();
-  var artist = document.getElementById('artist').value.trim();
-  var songId = document.getElementById('songId').value.trim();
-  var url = document.getElementById('sourceUrl').value.trim();
-  var fileInput = document.getElementById('sourceFile');
-  var file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-
-  if (!file && !url) {
-    result.className = 'err'; result.textContent = 'Choose a file or enter a URL.'; result.style.display = 'block';
-    return;
-  }
-
-  btn.disabled = true; btn.textContent = 'Uploading...';
-
-  try {
-    var fd = new FormData();
-    fd.append('title', title);
-    fd.append('artist', artist);
-    if (songId) fd.append('songId', songId);
-    if (file) {
-      fd.append('file', file);
-    } else {
-      fd.append('url', url);
-    }
-
-    var res = await fetch('/songUpload', { method: 'POST', body: fd });
-    var data = await res.json();
-
-    if (res.ok) {
-      result.className = 'ok';
-      result.textContent = 'Uploaded! Song ID: ' + data.songId + '\\nCDN URL: ' + data.cdnUrl;
-    } else {
-      result.className = 'err';
-      result.textContent = 'Failed: ' + (data.error || 'unknown error');
-    }
-    result.style.display = 'block';
-  } catch (err) {
-    result.className = 'err'; result.textContent = 'Request failed: ' + err.message; result.style.display = 'block';
-  } finally {
-    btn.disabled = false; btn.textContent = 'Upload';
-  }
-});
-</script>
 </body>
 </html>`;
 
@@ -179,6 +112,23 @@ var worker_default = {
     }
 
     if (url.pathname === "/songUpload" && request.method === "POST") {
+      // Browsers doing a real <form> submit send Accept: text/html (among
+      // others) by default; API/programmatic callers explicitly ask for
+      // JSON. This lets both work without needing two separate endpoints.
+      const wantsHtml = (request.headers.get("accept") || "").includes("text/html");
+
+      function respond(status, ok, payload) {
+        if (wantsHtml) {
+          const msg = ok
+            ? `Uploaded!\n\nSong ID: ${payload.songId}\nCDN URL: ${payload.cdnUrl}`
+            : `Failed: ${payload.error}`;
+          return new Response(resultPage(ok ? "Uploaded" : "Upload failed", msg, ok),
+            { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
+        }
+        return new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
+      }
+      __name(respond, "respond");
+
       try {
         const contentType = request.headers.get("content-type") || "";
         let title = "", artist = "", requestedId = null, sourceUrl = null, uploadedFile = null;
@@ -192,7 +142,7 @@ var worker_default = {
           const urlField = form.get("url");
           if (urlField) sourceUrl = urlField.toString().trim();
           const fileField = form.get("file");
-          if (fileField && typeof fileField === "object" && "arrayBuffer" in fileField) {
+          if (fileField && typeof fileField === "object" && "arrayBuffer" in fileField && fileField.size > 0) {
             uploadedFile = fileField;
           }
         } else {
@@ -204,37 +154,35 @@ var worker_default = {
         }
 
         if (!title || !artist) {
-          return new Response(JSON.stringify({ error: "title and artist are required" }), { status: 400 });
+          return respond(400, false, { error: "title and artist are required" });
         }
         if (!sourceUrl && !uploadedFile) {
-          return new Response(JSON.stringify({ error: "provide either a source url or a file" }), { status: 400 });
+          return respond(400, false, { error: "provide either a source url or a file" });
         }
 
         let songId;
         if (requestedId) {
           if (isNaN(requestedId) || requestedId < CUSTOM_ID_MIN || requestedId > CUSTOM_ID_MAX) {
-            return new Response(JSON.stringify({
+            return respond(400, false, {
               error: `songId must be between ${CUSTOM_ID_MIN} and ${CUSTOM_ID_MAX} - this range is reserved so custom uploads never collide with real Newgrounds song IDs`
-            }), { status: 400 });
+            });
           }
           songId = requestedId;
         } else {
           songId = await findFreeCustomId(env);
-          if (!songId) {
-            return new Response(JSON.stringify({ error: "couldn't find a free id, try again" }), { status: 500 });
-          }
+          if (!songId) return respond(500, false, { error: "couldn't find a free id, try again" });
         }
 
         const r2Key = `musics/${songId}.mp3`;
         const existing = await env.SONG_CACHE.head(r2Key);
         if (existing) {
-          return new Response(JSON.stringify({ error: `song id ${songId} is already in use`, songId }), { status: 409 });
+          return respond(409, false, { error: `song id ${songId} is already in use`, songId });
         }
 
         let bytes;
         if (uploadedFile) {
           if (uploadedFile.size > MAX_UPLOAD_BYTES) {
-            return new Response(JSON.stringify({ error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` }), { status: 413 });
+            return respond(413, false, { error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` });
           }
           bytes = new Uint8Array(await uploadedFile.arrayBuffer());
         } else {
@@ -242,24 +190,24 @@ var worker_default = {
           try {
             fetchRes = await fetch(sourceUrl, { headers: { "User-Agent": "Mozilla/5.0 (compatible; robtopcdn-proxy/1.0)" } });
           } catch (e) {
-            return new Response(JSON.stringify({ error: `couldn't reach that url: ${e.message}` }), { status: 400 });
+            return respond(400, false, { error: `couldn't reach that url: ${e.message}` });
           }
           if (!fetchRes.ok) {
-            return new Response(JSON.stringify({ error: `source url returned HTTP ${fetchRes.status}` }), { status: 400 });
+            return respond(400, false, { error: `source url returned HTTP ${fetchRes.status}` });
           }
           const contentLength = fetchRes.headers.get("content-length");
           if (contentLength && parseInt(contentLength, 10) > MAX_UPLOAD_BYTES) {
-            return new Response(JSON.stringify({ error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` }), { status: 413 });
+            return respond(413, false, { error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` });
           }
           const buf = await fetchRes.arrayBuffer();
           if (buf.byteLength > MAX_UPLOAD_BYTES) {
-            return new Response(JSON.stringify({ error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` }), { status: 413 });
+            return respond(413, false, { error: `file too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)` });
           }
           bytes = new Uint8Array(buf);
         }
 
         if (!looksLikeMp3(bytes)) {
-          return new Response(JSON.stringify({ error: "that doesn't look like a valid mp3 file" }), { status: 400 });
+          return respond(400, false, { error: "that doesn't look like a valid mp3 file" });
         }
 
         await env.SONG_CACHE.put(r2Key, bytes, {
@@ -267,11 +215,10 @@ var worker_default = {
           customMetadata: { songId: String(songId), title, artist, uploadedAt: new Date().toISOString(), custom: "true" }
         });
 
-        return new Response(JSON.stringify({ success: true, songId, key: r2Key, cdnUrl: `https://${url.host}/${songId}` }),
-          { status: 201, headers: { "Content-Type": "application/json" } });
+        return respond(201, true, { success: true, songId, key: r2Key, cdnUrl: `https://${url.host}/${songId}` });
 
       } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+        return respond(500, false, { error: err.message });
       }
     }
 
