@@ -114,6 +114,16 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
   <div id="result"></div>
 
 <script>
+window.onerror = function(msg, url, line, col, err) {
+  var r = document.getElementById('result');
+  if (r) {
+    r.className = 'err';
+    r.textContent = 'Page error: ' + msg + ' (line ' + line + ')';
+    r.style.display = 'block';
+  }
+  return false;
+};
+
 function setMode(mode) {
   document.getElementById('tabUrl').classList.toggle('active', mode === 'url');
   document.getElementById('tabFile').classList.toggle('active', mode === 'file');
@@ -161,7 +171,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
 
     if (res.ok) {
       result.className = 'ok';
-      result.textContent = 'Uploaded! Song ID: ' + data.songId + '\\nCDN URL: ' + data.cdnUrl;
+      result.textContent = 'Uploaded! Song ID: ' + data.songId + '\nCDN URL: ' + data.cdnUrl;
     } else {
       result.className = 'err';
       result.textContent = 'Failed: ' + (data.error || 'unknown error');
