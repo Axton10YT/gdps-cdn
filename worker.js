@@ -1,18 +1,9 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// â”€â”€ Custom (non-Newgrounds) upload ID range â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Real Newgrounds post IDs are currently in the low millions. Reserving
-// everything from 900,000,000 up guarantees no collision with any real NG
-// ID for the foreseeable future (NG would need ~900x its entire 20+ year
-// content history to reach this range). Verified empty before reserving it.
 const CUSTOM_ID_MIN = 900000000;
 const CUSTOM_ID_MAX = 999999999;
 
-// MP3 magic-byte check: either an ID3v2 tag ("ID3") or a raw MPEG frame
-// sync (0xFF followed by a byte with its top 3 bits set). This is a real
-// file-format check, not just trusting a claimed Content-Type - a URL or
-// a renamed file can lie about its extension, the bytes can't.
 function looksLikeMp3(bytes) {
   if (bytes.length < 3) return false;
   if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // "ID3"
@@ -21,7 +12,7 @@ function looksLikeMp3(bytes) {
 }
 __name(looksLikeMp3, "looksLikeMp3");
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // sane cap against abuse - no real GD song gets near this
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 async function findFreeCustomId(env) {
   for (let i = 0; i < 20; i++) {
@@ -33,6 +24,12 @@ async function findFreeCustomId(env) {
 }
 __name(findFreeCustomId, "findFreeCustomId");
 
+// Simplified, rebuilt from scratch. No tabs, no accept="" filter on the file
+// input (that specific combination is a known WebKit bug on iOS - both
+// Safari AND Chrome, since Chrome-iOS uses WebKit too - where it silently
+// greys out every file in the native picker, making nothing selectable).
+// Whichever of file/url is actually filled in is what gets used; the
+// server's magic-byte check is the real validation either way.
 const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -56,17 +53,10 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
     background: #0d1117; color: #e6edf3; font-size: 14px;
   }
   input[type=file] { width: 100%; padding: 8px 0; font-size: 13px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
-  .tab {
-    flex: 1; text-align: center; padding: 8px; border-radius: 7px; cursor: pointer;
-    background: #161b22; border: 1px solid #30363d; font-size: 13px; user-select: none;
-  }
-  .tab.active { background: #1f6feb; border-color: #1f6feb; }
-  .mode-panel { display: none; }
-  .mode-panel.active { display: block; }
+  .or { text-align: center; color: #6e7681; font-size: 12px; margin: 10px 0; }
   button {
     width: 100%; padding: 11px; border-radius: 7px; border: none; background: #238636;
-    color: white; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 18px;
+    color: white; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 4px;
   }
   button:disabled { background: #30363d; cursor: not-allowed; }
   #result { margin-top: 16px; padding: 12px; border-radius: 7px; font-size: 13px; display: none; white-space: pre-wrap; word-break: break-all; }
@@ -79,22 +69,14 @@ const UPLOAD_PAGE_HTML = `<!DOCTYPE html>
   <h1>Upload a Custom Song</h1>
   <p class="sub">Adds a track to the Cheese CDN music library. This is a public, open resource - no login needed.</p>
 
-  <div class="tabs">
-    <div class="tab active" id="tabUrl" onclick="setMode('url')">From URL</div>
-    <div class="tab" id="tabFile" onclick="setMode('file')">From Device</div>
-  </div>
-
-  <form id="uploadForm">
+  <form id="uploadForm" onsubmit="handleUpload(event); return false;">
     <fieldset>
-      <legend>Source</legend>
-      <div class="mode-panel active" id="panelUrl">
-        <label for="sourceUrl">Direct link to an .mp3 file</label>
-        <input type="url" id="sourceUrl" placeholder="https://example.com/song.mp3">
-      </div>
-      <div class="mode-panel" id="panelFile">
-        <label for="sourceFile">Choose an .mp3 file</label>
-        <input type="file" id="sourceFile" accept="audio/mpeg,.mp3">
-      </div>
+      <legend>Source - pick one</legend>
+      <label for="sourceFile">Choose an mp3 from your device</label>
+      <input type="file" id="sourceFile">
+      <div class="or">â€” or â€”</div>
+      <label for="sourceUrl">Direct link to an mp3 file</label>
+      <input type="url" id="sourceUrl" placeholder="https://example.com/song.mp3">
     </fieldset>
 
     <fieldset>
@@ -124,54 +106,54 @@ window.onerror = function(msg, url, line, col, err) {
   return false;
 };
 
-function setMode(mode) {
-  document.getElementById('tabUrl').classList.toggle('active', mode === 'url');
-  document.getElementById('tabFile').classList.toggle('active', mode === 'file');
-  document.getElementById('panelUrl').classList.toggle('active', mode === 'url');
-  document.getElementById('panelFile').classList.toggle('active', mode === 'file');
+function handleUpload(e) {
+  // Belt-and-suspenders: this is bound via an inline onsubmit="" attribute,
+  // not addEventListener - that's parsed as part of the HTML itself and
+  // can't silently fail to attach the way a separate script-timing-dependent
+  // listener can. The form's onsubmit ALSO unconditionally returns false,
+  // so a default page-reloading submission is structurally impossible here
+  // regardless of what happens inside, rather than depending on
+  // preventDefault() being reached inside a try block.
+  doUpload(e);
+  return false;
 }
 
-document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('submitBtn');
-  const result = document.getElementById('result');
+async function doUpload(e) {
+  var btn = document.getElementById('submitBtn');
+  var result = document.getElementById('result');
   result.className = ''; result.style.display = 'none';
 
-  const title = document.getElementById('title').value.trim();
-  const artist = document.getElementById('artist').value.trim();
-  const songId = document.getElementById('songId').value.trim();
-  const url = document.getElementById('sourceUrl').value.trim();
-  const fileInput = document.getElementById('sourceFile');
-  const usingFile = document.getElementById('tabFile').classList.contains('active');
+  var title = document.getElementById('title').value.trim();
+  var artist = document.getElementById('artist').value.trim();
+  var songId = document.getElementById('songId').value.trim();
+  var url = document.getElementById('sourceUrl').value.trim();
+  var fileInput = document.getElementById('sourceFile');
+  var file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
 
-  if (usingFile && !fileInput.files[0]) {
-    result.className = 'err'; result.textContent = 'Choose a file first.'; result.style.display = 'block';
-    return;
-  }
-  if (!usingFile && !url) {
-    result.className = 'err'; result.textContent = 'Enter a URL first.'; result.style.display = 'block';
+  if (!file && !url) {
+    result.className = 'err'; result.textContent = 'Choose a file or enter a URL.'; result.style.display = 'block';
     return;
   }
 
   btn.disabled = true; btn.textContent = 'Uploading...';
 
   try {
-    const fd = new FormData();
+    var fd = new FormData();
     fd.append('title', title);
     fd.append('artist', artist);
     if (songId) fd.append('songId', songId);
-    if (usingFile) {
-      fd.append('file', fileInput.files[0]);
+    if (file) {
+      fd.append('file', file);
     } else {
       fd.append('url', url);
     }
 
-    const res = await fetch('/songUpload', { method: 'POST', body: fd });
-    const data = await res.json();
+    var res = await fetch('/songUpload', { method: 'POST', body: fd });
+    var data = await res.json();
 
     if (res.ok) {
       result.className = 'ok';
-      result.textContent = 'Uploaded! Song ID: ' + data.songId + '\nCDN URL: ' + data.cdnUrl;
+      result.textContent = 'Uploaded! Song ID: ' + data.songId + '\\nCDN URL: ' + data.cdnUrl;
     } else {
       result.className = 'err';
       result.textContent = 'Failed: ' + (data.error || 'unknown error');
@@ -192,18 +174,10 @@ var worker_default = {
     const url = new URL(request.url);
     const pathSegments = url.pathname.split("/").filter(Boolean);
 
-    // â”€â”€ Route: GET /upload - the web form â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (url.pathname === "/upload" && request.method === "GET") {
       return new Response(UPLOAD_PAGE_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // â”€â”€ Route: POST /songUpload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Supports two request shapes:
-    //   multipart/form-data with a "file" field  -> direct device upload
-    //   multipart/form-data or JSON with a "url"  -> fetch from any URL
-    // Public, open, no auth - by design. The only real check is that the
-    // actual bytes are genuinely an MP3, checked via magic bytes, not by
-    // trusting whatever content-type or extension was claimed.
     if (url.pathname === "/songUpload" && request.method === "POST") {
       try {
         const contentType = request.headers.get("content-type") || "";
@@ -236,7 +210,6 @@ var worker_default = {
           return new Response(JSON.stringify({ error: "provide either a source url or a file" }), { status: 400 });
         }
 
-        // â”€â”€ Resolve the song ID â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let songId;
         if (requestedId) {
           if (isNaN(requestedId) || requestedId < CUSTOM_ID_MIN || requestedId > CUSTOM_ID_MAX) {
@@ -255,12 +228,9 @@ var worker_default = {
         const r2Key = `musics/${songId}.mp3`;
         const existing = await env.SONG_CACHE.head(r2Key);
         if (existing) {
-          return new Response(JSON.stringify({
-            error: `song id ${songId} is already in use`, songId
-          }), { status: 409 });
+          return new Response(JSON.stringify({ error: `song id ${songId} is already in use`, songId }), { status: 409 });
         }
 
-        // â”€â”€ Get the actual bytes, from whichever source was given â”€â”€â”€â”€â”€â”€â”€
         let bytes;
         if (uploadedFile) {
           if (uploadedFile.size > MAX_UPLOAD_BYTES) {
@@ -270,9 +240,7 @@ var worker_default = {
         } else {
           let fetchRes;
           try {
-            fetchRes = await fetch(sourceUrl, {
-              headers: { "User-Agent": "Mozilla/5.0 (compatible; robtopcdn-proxy/1.0)" }
-            });
+            fetchRes = await fetch(sourceUrl, { headers: { "User-Agent": "Mozilla/5.0 (compatible; robtopcdn-proxy/1.0)" } });
           } catch (e) {
             return new Response(JSON.stringify({ error: `couldn't reach that url: ${e.message}` }), { status: 400 });
           }
@@ -290,33 +258,23 @@ var worker_default = {
           bytes = new Uint8Array(buf);
         }
 
-        // â”€â”€ The actual format check - real magic bytes, not a trusted label â”€
         if (!looksLikeMp3(bytes)) {
           return new Response(JSON.stringify({ error: "that doesn't look like a valid mp3 file" }), { status: 400 });
         }
 
         await env.SONG_CACHE.put(r2Key, bytes, {
           httpMetadata: { contentType: "audio/mpeg" },
-          customMetadata: {
-            songId: String(songId),
-            title,
-            artist,
-            uploadedAt: new Date().toISOString(),
-            custom: "true"
-          }
+          customMetadata: { songId: String(songId), title, artist, uploadedAt: new Date().toISOString(), custom: "true" }
         });
 
-        return new Response(JSON.stringify({
-          success: true, songId, key: r2Key,
-          cdnUrl: `https://${url.host}/${songId}`
-        }), { status: 201, headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ success: true, songId, key: r2Key, cdnUrl: `https://${url.host}/${songId}` }),
+          { status: 201, headers: { "Content-Type": "application/json" } });
 
       } catch (err) {
         return new Response(JSON.stringify({ error: err.message }), { status: 500 });
       }
     }
 
-    // â”€â”€ Route: /info/{songId} â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let isInfoRequest = false;
     let rawSongId = "";
     if (pathSegments.length === 1) {
@@ -336,16 +294,13 @@ var worker_default = {
     const newR2Key = `musics/${id}.mp3`;
     const oldR2Key = `songs/${id}.mp3`;
 
-    // Custom-range IDs never hit Newgrounds at all - they only ever exist
-    // in R2, since there's no real NG post to look up for them.
     let ngInfo = { title: "Unknown", artist: "Unknown", duration: 0, streamUrl: null };
     let r2Head = null;
     if (isCustomRange) {
       r2Head = await env.SONG_CACHE.head(newR2Key);
       if (!r2Head) {
-        return new Response(JSON.stringify({ error: "no custom song with that id" }), {
-          status: 404, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-        });
+        return new Response(JSON.stringify({ error: "no custom song with that id" }),
+          { status: 404, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
     } else {
       ngInfo = await fetchNgMetadata(id);
@@ -357,9 +312,7 @@ var worker_default = {
         ctx.waitUntil((async () => {
           const hit = await env.SONG_CACHE.head(newR2Key);
           if (!hit) {
-            await cacheFullSong(env, newR2Key, downloadUrl, {
-              songId: String(id), title: ngInfo.title || "", artist: ngInfo.artist || ""
-            });
+            await cacheFullSong(env, newR2Key, downloadUrl, { songId: String(id), title: ngInfo.title || "", artist: ngInfo.artist || "" });
           }
         })());
       }
@@ -372,13 +325,9 @@ var worker_default = {
         streamUrl: isCustomRange ? `https://${url.host}/${id}` : downloadUrl,
         cdnUrl: `https://${url.host}/${id}`,
         custom: isCustomRange
-      }, null, 2), {
-        status: 200,
-        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-      });
+      }, null, 2), { status: 200, headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" } });
     }
 
-    // â”€â”€ Audio streaming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const range = request.headers.get("Range");
     const r2Options = range ? { range: parseRangeHeader(range) } : {};
 
@@ -480,10 +429,7 @@ async function fetchNgMetadata(id) {
 __name(fetchNgMetadata, "fetchNgMetadata");
 
 function fetchAudio(url, range) {
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; robtopcdn-proxy/1.0)",
-    "Referer": "https://www.newgrounds.com/"
-  };
+  const headers = { "User-Agent": "Mozilla/5.0 (compatible; robtopcdn-proxy/1.0)", "Referer": "https://www.newgrounds.com/" };
   if (range) headers["Range"] = range;
   return fetch(url, { headers });
 }
