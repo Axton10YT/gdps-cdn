@@ -269,6 +269,14 @@ var worker_default = {
         title: isCustomRange ? meta.title : ngInfo.title,
         artist: isCustomRange ? meta.artist : ngInfo.artist,
         duration: isCustomRange ? 0 : ngInfo.duration,
+        // Real file size in MB, from R2's own object metadata - custom
+        // uploads never populate the GDPS's local songs table (that only
+        // happens for real NG songs via SongReup), so this is the only
+        // place an accurate size is available for them. Without it, GD
+        // clients were being told every custom song was a placeholder
+        // "10.00 MB" regardless of actual size, and rejecting the download
+        // once the real (mismatched) byte count came back.
+        size: isCustomRange && r2Head.size ? (r2Head.size / 1024 / 1024).toFixed(2) : null,
         streamUrl: isCustomRange ? `https://${url.host}/${id}` : downloadUrl,
         cdnUrl: `https://${url.host}/${id}`,
         custom: isCustomRange
